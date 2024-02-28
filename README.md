@@ -1,401 +1,356 @@
-## llama2.c
+# Baby LLaMA 2 on Duo 速度优化
 
-<p align="center">
-  <img src="assets/llama_cute.jpg" width="300" height="300" alt="Cute Llama">
-</p>
+## 项目描述
 
-Have you ever wanted to inference a baby [Llama 2](https://ai.meta.com/llama/) model in pure C? No? Well, now you can!
+让 Baby LLaMA 2 运行在 Milk-V Duo 这样的小板子上是很有挑战的事情。本次竞赛旨在提升 Baby LLaMA 2 在 Milk-V Duo 平台上的性能，目标是实现更高的每秒 Token 处理速度。参赛者需要运用轻量级技术和编译器优化策略，结合麦克风语音输入或命令行输入提示词等多种方式，开发一个能够讲故事的机器人 Demo。该 Demo 应通过扬声器进行输出，并可借鉴小米米兔讲故事机器人的原型设计。
 
-Train the Llama 2 LLM architecture in PyTorch then inference it with one simple 700-line C file ([run.c](run.c)). You might think that you need many billion parameter LLMs to do anything useful, but in fact very small LLMs can have surprisingly strong performance if you make the domain narrow enough (ref: [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) paper). This repo is a "fullstack" train + inference solution for Llama 2 LLM, with focus on minimalism and simplicity.
+## 文档内容
 
-As the architecture is identical, you can also load and inference Meta's Llama 2 models. However, the current code only inferences models in fp32, so you will most likely not be able to productively load models larger than 7B. Work on model quantization is currently ongoing.
+- Baby LLaMA 2 推理速度优化
+  - 推理耗时分析
+  - 优化思路
+  - 优化结果
 
-Please note that this repo started recently as a fun weekend project: I took my earlier [nanoGPT](https://github.com/karpathy/nanoGPT), tuned it to implement the Llama-2 architecture instead of GPT-2, and the meat of it was writing the C inference engine in [run.c](run.c). So the project is young and moving quickly. Hat tip to the awesome [llama.cpp](https://github.com/ggerganov/llama.cpp) for inspiring this project. Compared to llama.cpp, I wanted something super simple, minimal, and educational so I chose to hard-code the Llama 2 architecture and just roll one inference file of pure C with no dependencies.
+- 文本转`.wav`语音文件
+- 未实现语音驱动输出功能
 
-## feel the magic
+## 优化结果展示
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/karpathy/llama2.c/blob/master/run.ipynb)
+### 针对 stories15M.bin 参数
 
-First, navigate to the folder where you keep your projects and clone this repository to this folder:
+| 尝试方案         | 优化选项  | 速度(token/s) | 说明 |
+| -----------     | ------    | ----- | ----- |
+| 基线             | -O3      |  0.370  |  |
+| 代码同基线       | -Ofast      |  0.355  |  |
+| RVV优化矩阵乘法     |    -O3    | 0.312 |  单独矩阵乘法速率1.2x加速，但由于内存限制，矩阵乘法优势无法体现，开启swap分区也无法加速，可能因为权重需要频繁在内存和swap间转移 |
+| 增加 -fopenmp 编译选项    |   -O3 -fopenmp      | 0.420 | 略有加速  |
+| 将权重加载至内存      |    -O3     | 0.198 | 效果下降明显，需要开启swap分区 |
+| int8量化    |   -O3     |     | 需要开启swap分区 |
+| int8量化    |  -O3 -fopenmp    |   6.165    | 效果好，基本与 -Ofast 优化器持平，需要开启swap分区 |
+| int8量化    | -Ofast -fopenmp  |   6.436    | 效果好，需要开启swap分区 |
 
-```bash
-git clone https://github.com/karpathy/llama2.c.git
+- 所有参数为 `-n 32 -s 1`，即生成 32 个token，随机数设为1。可以尝试其他值。
+- 上述测试时将输出重定向到文本，例如 `run stories15M.bin -n 32 -s 1 > output.txt`，重定向到文本比输出至控制台更快。
+
+### 针对 stories256K.bin 参数
+
+由于内存限制，对矩阵乘法优化在 stories15M.bin 中显现不出效果，用更小的权重 stories256K.bin 可以看出其效果。
+| 尝试方案        |优化选项| 速度(token/s)  |
+| -----------    | ----------- | ----- |
+| 基线           |   -O3       | 162.3 |
+| RVV优化矩阵乘法 |   -O3       | **211.9** |
+| 增加 -fopenmp 编译选项     |   -O3 -Ofopenmp    | 195.6 |
+
+## 优化代码操作步骤
+
+### 最优方案
+
+使用编译好的 `runq_best` 和对应权重 `stories15M_q8.bin` 二进制文件发送至Duo，生成故事命令：
+
+```shell
+# Duo开启共享内存
+mkswap /dev/mmcblk0p3
+swapon /dev/mmcblk0p3
+
+# Duo生成故事
+./runq_best stories15M_q8.bin -n 32 > stories.txt  # 生成故事至文件
+cat stories.txt                                    # 查看生成的故事
 ```
 
-Then, open the repository folder:
+可以增加 `-n 32 -s 1` 等分别控制生成token数量和随机数。
 
-```bash
-cd llama2.c
-```
+### 编译细节
 
-Now, let's just run a baby Llama 2 model in C. You need a model checkpoint. Download this 15M parameter model I trained on the [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) dataset (~60MB download):
+编译代码主机（简称主机）为 Ubuntu20.04 虚拟机。假设`riscv64-linux-musl-x86_64`安装主机的在 `/opt/riscv/` 路径下，如果不同则修改该部分内容。
 
-```bash
-wget https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin
-```
+2. 基线编译命令：
 
-Compile and run the C code:
+```shell
+# 主机上：编译
+/opt/riscv/riscv64-linux-musl-x86_64/bin/riscv64-unknown-linux-musl-gcc -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -I/opt/riscv/riscv64-linux-musl-x86_64/sysroot/usr/include -mcpu=c906fdv -march=rv64imafdcv0p7xthead -mcmodel=medany -mabi=lp64d -L/opt/riscv/riscv64-linux-musl-x86_64/sysroot/lib -L/opt/riscv/riscv64-linux-musl-x86_64/sysroot/usr/lib -O3 -o run run.c -lm
 
-```bash
-make run
+# Duo
 ./run stories15M.bin
+./run stories15M.bin -n 4 -s 1 # 指定token数量和随机数
 ```
 
-You'll see the text stream a sample. On my M1 MacBook Air this runs at ~110 tokens/s. See [performance](#performance) or the Makefile for compile flags that can significantly speed this up. We can also try a bit bigger 42M parameter model:
+3. 使用int8量化量化（目前最佳版本，需开启swap分区）
 
-```bash
-wget https://huggingface.co/karpathy/tinyllamas/resolve/main/stories42M.bin
-./run stories42M.bin
+```shell
+# 主机上：编译
+/opt/riscv/riscv64-linux-musl-x86_64/bin/riscv64-unknown-linux-musl-gcc -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -I/opt/riscv/riscv64-linux-musl-x86_64/sysroot/usr/include -mcpu=c906fdv -march=rv64imafdcv0p7xthead -mcmodel=medany -mabi=lp64d -L/opt/riscv/riscv64-linux-musl-x86_64/sysroot/lib -L/opt/riscv/riscv64-linux-musl-x86_64/sysroot/usr/lib -Ofast -o runq_best runq.c -lm -fopenmp -static-libgcc -static
+
+# 主机上：生成量化后权重 stories15M_q8.bin
+python export.py  stories15M_q8.bin --version 2 --checkpoint stories15M.pt
+
+# Duo: 开启swap分区
+mkswap /dev/mmcblk0p3
+swapon /dev/mmcblk0p3
+
+# Duo: 运行生成故事
+./runq stories15M_q8.bin -n 32 -s 1
 ```
 
-This still runs at interactive rates and samples more coherent and diverse stories:
+使用 `-static-libgcc -static` 编译成静态链接，避免Duo上没有OpenMP相关库。
 
-> Once upon a time, there was a little girl named Lily. She loved playing with her toys on top of her bed. One day, she decided to have a tea party with her stuffed animals. She poured some tea into a tiny teapot and put it on top of the teapot. Suddenly, her little brother Max came into the room and wanted to join the tea party too. Lily didn't want to share her tea and she told Max to go away. Max started to cry and Lily felt bad. She decided to yield her tea party to Max and they both shared the teapot. But then, something unexpected happened. The teapot started to shake and wiggle. Lily and Max were scared and didn't know what to do. Suddenly, the teapot started to fly towards the ceiling and landed on the top of the bed. Lily and Max were amazed and they hugged each other. They realized that sharing was much more fun than being selfish. From that day on, they always shared their tea parties and toys.
+4. 使用RVV加速矩阵运算（需开启swap分区）
 
-You can also prompt the model with a prefix or a number of additional command line arguments, e.g. to sample at temperature 0.8 for 256 steps and with a prompt:
+```shell
+# 主机上：先转置权重，因此矩阵RVV优化中矩阵采用列主序
+gcc transpose_weight.c -o transpose_weight  # 编译权重转换指令
+cp stories15M.bin stories15M.transpose.bin
+./transpose_weight stories15M.transpose.bin  # 此时 stories15M.transpose.bin 即为转置后权重
 
-```bash
-./run stories42M.bin -t 0.8 -n 256 -i "One day, Lily met a Shoggoth"
+# 主机上：编译
+/opt/riscv/riscv64-linux-musl-x86_64/bin/riscv64-unknown-linux-musl-gcc -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -I/opt/riscv/riscv64-linux-musl-x86_64/sysroot/usr/include -mcpu=c906fdv -march=rv64imafdcv0p7xthead -mcmodel=medany -mabi=lp64d -L/opt/riscv/riscv64-linux-musl-x86_64/sysroot/lib -L/opt/riscv/riscv64-linux-musl-x86_64/sysroot/usr/lib -O3 -o runt run_transpose.c -lm
+
+# Duo
+./runt stories15M.transpose.bin -n 32 -s 1
 ```
 
-> One day, Lily met a Shoggoth. He was very shy, but was also very generous. Lily said “Hello Shoggy! Can I be your friend?” Shoggy was happy to have a friend and said “Yes, let’s explore the universe together!” So they set off on a journey to explore the universe. As they travelled, Shoggy was happy to explain to Lily about all the wonderful things in the universe. At the end of the day, Lily and Shoggy had gathered lots of wonderful things from the universe, and they both felt very proud. They promised to explore the universe as one big pair and to never stop being generous to each other.
+如果要需要为权重分配内存，则更改 `read_checkpoint` 中的 `memory_map_weights`函数为 `memory_map_weights2`即可。
 
-There is also an even better 110M param model available, see [models](#models).
+### 针对 stories256K.bin 参数
 
-Quick note on sampling, the recommendation for ~best results is to sample with `-t 1.0 -p 0.9`, i.e. temperature 1.0 (default) but also top-p sampling at 0.9 (default). Intuitively, top-p ensures that tokens with tiny probabilities do not get sampled, so we can't get "unlucky" during sampling, and we are less likely to go "off the rails" afterwards. More generally, to control the diversity of samples use either the temperature (i.e. vary `-t` between 0 and 1 and keep top-p off with `-p 0`) or the top-p value (i.e. vary `-p` between 0 and 1 and keep `-t 1`), but not both. Nice explainers on LLM sampling strategies include [this](https://peterchng.com/blog/2023/05/02/token-selection-strategies-top-k-top-p-and-temperature/), [this](https://docs.cohere.com/docs/controlling-generation-with-top-k-top-p) or [this](https://huggingface.co/blog/how-to-generate).
+```shell
+# 主机上：先转置权重，因此矩阵RVV优化中采用列主序
+gcc transpose_weight.c -o transpose_weight  # 编译权重转换指令
+cp stories260K.bin stories260K.transpose.bin
+./transpose_weight stories260K.transpose.bin  # 此时 stories15M.transpose.bin 即为转置后权重
 
-## Meta's Llama 2 models
-
-As the neural net architecture is identical, we can also inference the Llama 2 models released by Meta. Sadly there is a bit of friction here due to licensing (I can't directly upload the checkpoints, I think). So Step 1, get the Llama 2 checkpoints by following the [Meta instructions](https://github.com/facebookresearch/llama). Once we have those checkpoints, we have to convert them into the llama2.c format.
-For this we need to install the python dependencies (`pip install -r requirements.txt`) and then use the `export.py` file, e.g. for 7B model:
-
-```bash
-python export.py llama2_7b.bin --meta-llama path/to/llama/model/7B
+# Duo
+./run stories260K.bin -n 1024 -s 1 > stories260K.txt                      # 基线
+./runt stories260K.transpose.bin -n 1024 -s 1 > stories260K.transpose.txt # 矩阵优化后
 ```
 
-The export will take ~10 minutes or so and generate a 26GB file (the weights of the 7B model in float32) called `llama2_7b.bin` in the current directory. It has been [reported](https://github.com/karpathy/llama2.c/pull/85) that despite efforts. I would not attempt to run anything above 7B right now for two reasons: first, 13B+ currently doesn't work because of integer flow in pointer arithmetic, which is yet to be fixed, and second, even if it were fixed, this repo is doing float32 inference right now, so it would be fairly unusably slow. Once the export is done, we can run it:
+可以通过 `cat stories260K.transpose.txt` 指令查看生成内容，两个文件内容一致，尽管发现优势 runt 会报 dump segmetation，在 stories15M.transpose.bin 模型中无此错误，暂时未找到原因。
 
-```bash
-./run llama2_7b.bin
+## 代码分析
+
+Baby LLaMA 2项目[github](https://github.com/karpathy/llama2.c) 中给出了C语言本版的LLaMA推理实现，其主要内容包括：
+
+- 神经网络模块结构体
+  - `struct Config`: 网络配置
+  - `struct TransformerWeights`: Transformer权重
+  - `struct RunState`: 运行时的中间状态，例如矩阵乘法得到的结果
+
+- 权重读取、映射、释放内存等辅助函数
+  - `malloc_run_state`，`free_run_state`: 初始化与释放
+  - `build_transformer`, `free_transformer`: 初始化与释放
+  - `memory_map_weights`: 将权重映射到`struct TransformerWeights`
+  - `read_checkpoint`: 读取权重，会调用`memory_map_weights`
+
+- 神经网络模块函数
+  - `rmsnorm`, `softmax`, `matmul`: 网络里面的基本函数
+  - `forward`: 前向传播实现
+
+- 其他Token编解码相关结构体或函数（优化时未考虑）
+  - `struct ProbIndex`, `struct Sampler`.
+  - `sample_argmax`, `sample_mult`, `compare`, `sample_topp`, `build_sampler`, `free_sampler`, `random_u32`, `random_f32`, `sample`, `time_in_ms`.
+
+对所有代码进行分析，运算层面值得优化的为矩阵乘法实现 `matmul` 函数，源代码中实现为：
+
+```python
+void matmul(float* xout, float* x, float* w, int n, int d) {
+    // W (d,n) @ x (n,) -> xout (d,)
+    // by far the most amount of time is spent inside this little function
+    int i;
+    #pragma omp parallel for private(i)
+    for (i = 0; i < d; i++) {
+        float val = 0.0f;
+        for (int j = 0; j < n; j++) {
+            val += w[i * n + j] * x[j];
+        }
+        xout[i] = val;
+    }
+}
 ```
 
-This ran at about 4 tokens/s compiled with [OpenMP](#OpenMP) on 96 threads on my CPU Linux box in the cloud. (On my MacBook Air M1, currently it's closer to 30 seconds per token if you just build with `make runfast`.) Example output:
+该函数实现了 `W (d,n) @ x (n,) -> xout (d,)` 的矩阵乘法，并且作者给出注释“by far the most amount of time is spent inside this little function”，含义为“目前运行中大部分消耗在这简短的几行代码上”。以 `stories15M.bin` 权重为例，生成 10 个token。
 
-> The purpose of this document is to highlight the state-of-the-art of CoO generation technologies, both recent developments and those in commercial use. The focus is on the technologies with the highest merit to become the dominating processes of the future and therefore to be technologies of interest to S&amp;T ... R&amp;D. As such, CoO generation technologies developed in Russia, Japan and Europe are described in some depth. The document starts with an introduction to cobalt oxides as complex products and a short view on cobalt as an essential material. The document continues with the discussion of the available CoO generation processes with respect to energy and capital consumption as well as to environmental damage.
+函数调用关系为： `generate` 调用 `forward`，`forward`调用 `matmul`。
 
-base models... ¯\\_(ツ)_/¯. Since we can inference the base model, it should be possible to also inference the chat model quite easily, and have a conversation with it. And if we can find a way to run 7B more efficiently, we can start adding LoRA to our training script, and going wild with finetunes all within the repo!
+消耗时间：`generate`耗时 3904 ms，`forward` 耗时 `3844 ms`，`matmul` 耗时 `3822 ms`，$3822/3904 = 97.9\%$。
 
-You can also chat with the Llama Chat models. Export the chat model exactly as above:
+**结论：对话生成中，约 $98\%$ 的时间耗费在矩阵乘法 `matmul` 中。**
 
-```bash
-python export.py llama2_7b_chat.bin --meta-llama /path/to/7B-chat
+因此，通过优化 Duo 矩阵乘法速度是加速推理的手段之一。
+
+### 矩阵大小分析
+
+上述得出矩阵乘法占据推理中约 $98\%$ 的时间，输出矩阵乘法，可以得出 Baby LLaMA 2中做乘法的实际为矩阵与向量相乘，其输入矩阵维度为$d$行$n$列，所乘向量为 $n$ 个元素，输出向量为 $d$ 个元素。矩阵大小如下：
+
+| 矩阵名称      | 矩阵大小($d\times n$) | 乘法次数 |
+| ----------- | ----------- | ----- |
+| `wq`      | $(288\times 288)$        | 6 |
+| `wk`      | $(288\times 288)$        | 6 |
+| `wv`      | $(288\times 288)$        | 6 |
+| `wo`      | $(288\times 288)$        | 6 |
+| `w1`      | $(768\times 288)$        | 6 |
+| `w2`      | $(288\times 768)$        | 6 |
+| `w3`      | $(768\times 288)$        | 6 |
+| `wcls`    | $(32000\times 288)$      | 1 |
+
+可见其中矩阵 `wcls` 明显比其他矩阵大得多。
+
+## 性能瓶颈
+
+在实测推理中发现，对于 `stories15M.bin` 并使用 `float32` 类型权重时，推理速度慢，使用 `free -m` 查看内存占用率，发现内存占用几乎不变，CPU利用率也很低。
+
+推理前CPU使用和内存占用：
+![alt text](assets/image-2.png)
+
+推理中CPU和内存：
+![alt text](assets/image-3.png)
+
+发现内存几乎就增加 2M，CPU利用率在5%-30%左右浮动。`float32` 的模型将近有 58M，分析载入代码发现，在载入权重的函数 `read_checkpoint` 通过内存映射函数 `mmap` 实现内存映射，而不是使用 `malloc` 或 `calloc` 等分配内存并复制权重。这也许是限制推理速度的重要原因，因为从磁盘中读取权重速度远比从内存中读取慢。最终推理10个token，速度为 0.36 token/s。
+
+## 优化思路
+
+通过上述分析，得出四种可行的优化思路：
+
+- 使用GEMM优化矩阵乘法
+- 将权重加载至内存
+- 使用量化，将模型量化为 int8 类型
+- 使用编译器优化选型加速
+
+## 优化效果分析
+
+### GEMM矩阵乘法优化
+
+GEMM的优化主要集中在提高计算效率和利用硬件特性方面。以下是一些常见的优化技术：
+
+- 缓存友好性：通过重组计算顺序以利用缓存，减少内存访问次数，从而提高性能。
+- 矩阵分块：将大矩阵分解成小的子矩阵，以便在缓存中存储并重复使用数据，减少内存访问的非连续性。
+- 指令级并行：利用SIMD指令集，如SSE和AVX，同时处理多个数据，加速计算。
+- 多线程并行：使用多个线程同时处理不同的矩阵乘法操作，充分利用多核处理器的性能。
+
+对原来矩阵乘法使用缓存友好、矩阵分块、RVV指令集进行优化，测试10次，优化前矩阵乘耗时约 73 ms，使用 `riscv64-unknown-linux-musl-gcc` 交叉编译器，开启 `-O3` 优化，对比如下：
+
+|  矩阵大小($d\times n$)    | 优化前平均耗时(ms) | 优化后平均耗时(ms) |  优化后/前耗时比 |
+| ----------- | ----------- | ----- | --- |
+| $(288\times 288)$      |   0.676 | 0.501 |  0.742 |
+| $(768\times 288)$      |   1.784 | 0.951 |  0.533 |
+| $(288\times 768)$      |   1.734 | 1.339 |  0.772 |
+| $(32000\times 288)$    |   73.20 | 58.87 |  0.804 |
+
+可以看出，优化后耗时大约变为原来的 80% 左右。
+
+另外根据矩阵大小及使用次数，可以估计优化前每次 `forward`中`matmul`函数耗时大约为 120 ms 左右，则上限速度应有 1000/120 = 8 token/s，优化后大约达到 10 token/s， 远远高于实际所得的 0.36 token/s。
+
+使用RVV实现的矩阵乘法代码如下，其具有和原项目中 `matmul` 几乎一样的接口，唯一区别是其中权重矩阵 `w` 变成其转置 `wt`，这样做是因为原项目实现使用行主序，现在针对RVV换成列主序更高效。
+
+```python
+#include <riscv_vector.h>
+#define VLEN 32
+void vector_multiply(int n, int d, size_t vlen, const float *w,
+        const float *x, float *xout)
+{
+    // xout = x[i] * w + xout
+    int i;
+    vfloat32m8_t vw, vxout;
+    vxout = vle32_v_f32m8(xout, vlen);
+    for (i=0; i<n; i++) {
+        vw = vle32_v_f32m8(w, vlen);
+        vxout = vfmacc_vf_f32m8(vxout, x[i], vw, vlen);
+        w += d;
+    }
+    vse32_v_f32m8(xout, vxout, vlen);
+}
+
+void matmul(float* xout, float* x, float* wt, int n, int d) {
+    // Wt (n,d) @ x (n,) -> xout (d,)
+    memset(xout, 0, d * sizeof(float));
+
+    size_t i, j;
+    size_t vlen = VLEN;
+    const int nn = 4;
+    memset(xout, 0, d * sizeof(float));
+    #pragma omp parallel for private(i)
+    for(j=0; j<n; j+=nn) {
+      for(i=0; i<d; i+=vlen) {
+        vector_multiply(nn, d, vlen, wt+i+j*d, x+j, xout + i);
+      }
+    }
+}
 ```
 
-Then chat with it by specifying the chat mode using the `-m` flag, e.g.:
+由于矩阵乘法接口发生转变，因此需要对训练所有权重也转置，提供文件 `transpose_weight.c`，将其本地编译二进制文件 `transpose_weight`，在本地对其中进行转换，再将转换后的权重等传送到Duo进行测试。`transpose_weight` 会在原空间内实现矩阵转置，因此先拷贝一份权重。
+使用示例：
 
-```bash
-./run llama2_7b_chat.bin -m chat
+```shell
+gcc transpose_weight.c -o transpose_weight  # 编译权重转换指令
+cp stories15M.bin stories15M.transpose.bin
+./transpose_weight stories15M.transpose.bin  # 此时 stories15M.transpose.bin 即为转置后权重
 ```
 
-You can also try Meta's Code Llama models even if support for them is incomplete. In particular, some hyperparameters changed (e.g. the constant in RoPE layer), so the inference is not exactly correct and a bit buggy right now. Looking into fixes. Make sure to build the tokenizer for the plain and instruct variants and pass it when doing inference.
+### 将权重加载至内存
 
-```bash
-python export.py codellama2_7b.bin --meta-llama /path/to/CodeLlama-7b
-python tokenizer.py --tokenizer-model=/path/to/CodeLlama-7b/tokenizer.model
-./run codellama2_7b.bin -z /path/to/CodeLlama-7b/tokenizer.bin
+由于 `float32` 类型的 `stories15M.bin` 权重总共为 58M 字节，部分内存分配给系统和超过系统可用的内存大小（约38M），因此需要开启 swap 空间。开启后，然而，通过 `malloc` 或 `calloc` 分配内存后，并未获得明显加速，完成 $(32000\times 288)$ 仍然耗时 350 ms 左右，而不是期待的不到 60 ms。
+
+未实现加速可能原因：仔细分析后发现，运行时占用 38 M 内存和 15 M 交换空间，由于每次生成token时需要遍历权重，则一定存在将部数据从swap空间搬运到内存，这在每次生成 token 时都出现，这一机制严重影响读取效率，导致系统浪费大量时间在IO操作上。事实上，目前主流的做法是将权重完全加载到内存再进行模型推理，而应避免使用swap空间。
+
+![alt text](assets/image-5.png)
+
+### 将模型量化为 int8 类型
+
+模型量化能在一定程度上加速推理速度，Baby LLaMA 作者也提供了模型量化C语言实现代码 `runq.c`，`riscv64-unknown-linux-musl-gcc` 交叉编译器，开启 `-O3` 优化，如果使用swap分区，将直接报错。开启默认的256M swap分区后，运行模型，速率为 token/s。查看内存和CPU利用率，此时CPU有92%。
+
+### 使用编译器优化选型加速
+
+尝试使用 OpenMP 对模型进行加速。由于模型在单核上运行，而 OpenMP 的 MP 代表多线程，开启 OpenMP 优化似乎有些反直觉。事实上，在 float32 类型权重中开启 OpenMP 优化，性能没有提升，反而略有下降。但在量化后的 int8 类型中，性能却明显提升，可能是因为量化实现的 `matmul` 中有大量 `int8` 到 `int32` 转换，以及 `int32` 和 `float32` 相乘的转换指令，导致整个矩阵乘法使用多线程更有优势。
+
+量化版本 `runq.c` 中实现的 `matmul` 代码如下：
+
+```python
+void matmul(float* xout, QuantizedTensor *x, QuantizedTensor *w, int n, int d) {
+    // W (d,n) @ x (n,) -> xout (d,)
+    // by far the most amount of time is spent inside this little function
+    // inputs to this function are both quantized
+
+    int i;
+    #pragma omp parallel for private(i)
+    for (i = 0; i < d; i++) {
+        float val = 0.0f;
+        int32_t ival = 0;
+        int in = i * n;
+        // do the matmul in groups of GS
+        int j;
+        for (j = 0; j <= n - GS; j += GS) {
+            for (int k = 0; k < GS; k++) {
+                ival += ((int32_t) x->q[j + k]) * ((int32_t) w->q[in + j + k]);
+            }
+            val += ((float) ival) * w->s[(in + j) / GS] * x->s[j / GS];
+            ival = 0;
+        }
+        xout[i] = val;
+    }
+}
 ```
 
-Chat with Code Llama Instruct:
+此时查看 CPU 和内存利用率，此时使用18M左右内存（图中的32M内存中在运行程序前已经有14M已使用内存）和22M交换空间，CPU利用率90%左右。尽管使用较多交换空间，但`int8`类型权重本身仅有15M左右，因此权重不存放在交换空间，使得程序整体效率更高。
 
-```bash
-python export.py codellama2_7b_instruct.bin --meta-llama /path/to/CodeLlama-7b-Instruct
-python tokenizer.py --tokenizer-model=/path/to/CodeLlama-7b-Instruct/tokenizer.model
-./run codellama2_7b_instruct.bin -m chat -z /path/to/CodeLlama-7b-Instruct/tokenizer.bin
-```
+![alt text](assets/image-6.png)
 
-## int8 quantization
+最终生成故事例子如下图，可见语法和拼写基本正确，而且上下文具有一定连贯性。
 
-The (default) script [run.c](run.c), above, uses a float32 forward pass, where the entire calculation of the forward pass is kept in fp32. This is very easy to understand as far as reference code goes, but it has the following downsides: the model checkpoint files are very large (it takes 4 bytes per every individual weight), and the forward pass is relatively slow. The (very) common inference optimization employed in practice is to quantize the model parameters to lower precision, giving up a little bit of correctness in return for smaller checkpoint sizes and faster forward passes (as most of the inference uses integer arithmetic). Empirically, LLMs can tolerate precisions as low as 4-bit (or even lower), but we use int8 here because it is a "safe" setting that gets us the benefits but doesn't sacrifice too much of the model accuracy. Only the weights that participate in matmuls are quantized. All the other parameters (e.g. especially the scale and bias in RMSNorm) are kept in float32, because these layers are very sensitive. Now, if all you're after is reduction in checkpoint sizes, you could quantize the weights, save the checkpoint, and then dequantize them in run.c, and do float32 inference as normal and call it a day. This is totally fine. But here, we go one step further (as is standard practice) and additionally quantize the activations in the forward pass. This requires us to dynamically quantize and dequantize between float32 and int8 at runtime, which adds overhead. But the benefit is that now the majority of the calculations (the matmuls especially!) are using pure integer arithmetic, where both weights and activations enter as int8. This is where the speedups can fundamentally come from. The version we use is the "Q8_0" quantization (llama.cpp terminology), where the 0 means that the weight quantization is symmetric around 0, quantizing to the range [-127, 127].
+![alt text](assets/image-7.png)
 
-The quantized forward pass is implemented in [runq.c](runq.c). To use it, we have to export the model in the quantized format. For example, the float32 version of Llama 2 7B was exported as:
+## 文本转`.wav`语音文件
 
-```
-python export.py llama2_7b.bin --meta-llama path/to/llama/model/7B
-```
+项目链接：https://github.com/festvox/flite
 
-This creates a 26GB file, because each one of 7B parameters is 4 bytes (fp32). To export it quantized, we instead use version 2 export:
+在 Duo 上使用 Flite 例子：
 
-```
-python export.py llama2_7b_q80.bin --version 2 --meta-llama path/to/llama/model/7B
-```
+![alt text](assets/image-8.png)
 
-This runs for a few minutes, but now creates only a 6.7GB file. For exporting non-meta checkpoints you would use the --checkpoint arg instead of --meta-llama arg (more docs on this later, below). Now let's inference them. I like to use OMP here because these are big models, so e.g. on my Linux box:
+包含交叉编译二进制的文件见 Flite.tar.gz。
 
-```
-make runomp
-OMP_NUM_THREADS=64 ./run llama2_7b.bin -n 40
-OMP_NUM_THREADS=64 ./runq llama2_7b_q80.bin -n 40
-```
+## 结论
 
-This runs 40 steps just to get a timing. The float32 version for me runs at 4.6 tok/s, and the int8 version at 14 tok/s. So we achieved a 3X speedup while reducing the checkpoint size by 4X. However, the forward pass is quantized to int8, and therefore silently very slightly lower quality.
+根据上述分析，可以得出Baby LLaMA 2 on Duo 优化的相关结论。
 
-## huggingface models
-
-We can load any huggingface models that use the Llama 2 architecture. See the script [export.py](export.py) and the `--hf` flag to export the model .bin file.
-
-## models
-
-For the sake of examples of smaller, from-scratch models, I trained a small model series on TinyStories. All of these trained in a few hours on my training setup (4X A100 40GB GPUs). The 110M took around 24 hours. I am hosting them on huggingface hub [tinyllamas](https://huggingface.co/karpathy/tinyllamas), both in the original PyTorch .pt, and also in the llama2.c format .bin:
-
-| model | dim | n_layers | n_heads | n_kv_heads | max context length | parameters | val loss | download
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 260K | 64 | 5 | 8 | 4 | 512 | 260K | 1.297 | [stories260K](https://huggingface.co/karpathy/tinyllamas/tree/main/stories260K)
-| OG | 288 | 6 | 6 | 6 | 256 | 15M | 1.072 | [stories15M.bin](https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin) |
-| 42M| 512 | 8 | 8 | 8 | 1024 | 42M | 0.847 | [stories42M.bin](https://huggingface.co/karpathy/tinyllamas/resolve/main/stories42M.bin) |
-| 110M| 768 | 12 | 12 | 12 | 1024 | 110M | 0.760 | [stories110M.bin](https://huggingface.co/karpathy/tinyllamas/resolve/main/stories110M.bin) |
-
-You'll notice that the 110M model is equivalent to GPT-1 in size. Alternatively, this is also the smallest model in the GPT-2 series (`GPT-2 small`), except the max context length is only 1024 instead of 2048. The only notable changes from GPT-1/2 architecture is that Llama uses RoPE relatively positional embeddings instead of absolute/learned positional embeddings, a bit more fancy SwiGLU non-linearity in the MLP, RMSNorm instead of LayerNorm, bias=False on all Linear layers, and is optionally multiquery (but this is not yet supported in llama2.c).
-
-## training
-
-Let's see how we can train a baby Llama 2 from scratch using the code in this repo. First let's download and pretokenize some source dataset, e.g. I like [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) so this is the only example currently available in this repo. But it should be very easy to add datasets, see the code.
-
-```bash
-python tinystories.py download
-python tinystories.py pretokenize
-```
-
-Then train our model:
-
-```bash
-python train.py
-```
-
-**brief training guide**. See the train.py script for more exotic launches and hyperparameter overrides. Here is a brief guide to how to set the parameters. Look at the table at the very end of the [Chinchilla paper](https://arxiv.org/abs/2203.15556) to get a sense of how the Transformer parameters (dim, n_layers, n_heads) grow or shrink together. Extrapolate/interpolate this pattern to get bigger or smaller transformers. Set the max context length however you wish, depending on the problem: this should be the max number of tokens that matter to predict the next token. E.g. Llama 2 uses 2048. Next, you want the _total_ batch size per update (printed by the script as "tokens per iteration will be:") to be somewhere around 100K tokens for medium-sized applications. For tiny applications it could be lower, for large training (e.g. GPTs/LLamas) it is usually ~0.5M, or even more. You get there by first maxing out the batch_size to whatever your system allows (e.g. mine was 16 in a recent run because after that my GPU runs out of memory), and then you want to increase gradient_accumulation_steps to be as high as necessary to reach the total batch size of ~100K. Finally, you want to tune your learning_rate (LR). You want this to be as high as your training allows. Very small networks can get away with a large LR (e.g. 1e-3 or even higher). Large networks need lower LRs. 3e-4 is a safe choice in most medium-sized applications, but can be too low for small networks, so try to increase it! Finally, max_iters is the length of training. Play with different settings. I mostly only ever tune these parameters and leave most of the others unchanged. Here is an example of how I trained the 110M model, which I don't think is anywhere near optimal, but looked sensible to me: dim 768, n_layers 12, n_heads 12 (so size of each head is 768 / 12 = 64 channels), seq len of 1024, batch size 16 (this is the most that fit my A100 40GB GPU), gradient_accumulation_steps = 8 was needed to get total tokens batch size to be 16 batch size * 1024 tokens in sequence * 8 grad_accum = 131,072 tokens per update. Good. Learning rate 4e-4 (probably a little too low). max_iters 200K (probably a bit too high). Dropout 0.1, as that usually helps a bit at medium size. That was it. I ran using Distributed Data Parallel (DDP) on 4 GPUs on my cloud machine, training took ~day or so.
-
-Totally understand if you want to skip model training, for simple demo just download one of the pretrained models (see [models](#models) section), e.g.:
-
-```bash
-wget https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin
-```
-
-Once we have the model.bin file, we can inference in C. Compile the C code first:
-
-```bash
-make run
-```
-
-You can now run it simply as
-
-```bash
-./run stories15M.bin
-```
-
-Watch the tokens stream by, fun! We can also run the PyTorch inference script for a comparison. Download one of the models again from huggingface hub and point the `sample.py` script at it:
-
-```bash
-wget https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.pt -P out15M
-python sample.py --checkpoint=out15M/stories15M.pt
-```
-
-Which gives the same results.
-
-## custom tokenizers
-
-In everything above, we've assumed the custom Lllama 2 tokenizer with 32,000 tokens. However, in many boutique LLMs, using vocabulary this big might be an overkill. If you have a small application you have in mind, you might be much better off training your own tokenizers. This can make everything nicer - with smaller vocabs your model has fewer parameters (because the token embedding table is a lot smaller), the inference is faster (because there are fewer tokens to predict), and your average sequence length per example could also get smaller (because the compression is a lot more efficient on your data). So let's see how we train a custom tokenizer.
-
-By default, to pretokenize the tinystories dataset we had to run, in order:
-
-```
-python tinystories.py download
-python tinystories.py pretokenize
-```
-
-The `pretokenize` stage here loads the Llama 2 tokenizer (vocab size 32,000) and uses it to convert the downloaded text into integers, and saves that to file. We now change this as follows, to train an example 4096-token tokenizer:
-
-```
-python tinystories.py download
-python tinystories.py train_vocab --vocab_size=4096
-python tinystories.py pretokenize --vocab_size=4096
-```
-
-The `train_vocab` stage will call the `sentencepiece` library to train the tokenizer, storing it in a new file `data/tok4096.model`. I tried to reproduce as well as I could the settings that (I think) Meta used to train their vocabulary. This uses the Byte Pair Encoding algorithm that starts out with raw utf8 byte sequences of the text data and then iteratively merges the most common consecutive pairs of tokens to form the vocabulary. Inspect the `tinystories.py` file - the custom tokenizers are stored in a special directory structure indexed by the vocab size.
-
-A quick note of interest is that vocab size of 4096 trained specifically on tinystories creates integer sequences with about the same sequence length per example as the default Llama 2 tokenizer of 32000 tokens! This means that our custom, tailored tokenizer is a lot better adapted to our specific text, and can compress it very effectively. So our trained models are smaller and faster.
-
-Now that we have pretokenized the dataset with our custom tokenizer, we can train the model. The training script `train.py` doesn't care about the exact tokens, it only cares about the vocabulary size so it can correctly initialize the model. So when training your model, make sure to pass in
-
-```
-python train.py --vocab_source=custom --vocab_size=4096
-```
-
-(The defaults are `llama2` and `32000` respectively, which indicates the default Llama 2 tokenizer). This trains the model. Finally we are ready to run inference with our `run.c` script. For that we need two things. Number one, we have to export our tokenizer in the `.bin` format, do that with:
-
-```
-python tokenizer.py --tokenizer-model=data/tok4096.model
-```
-
-This writes the tokenizer to `data/tok4096.bin`. Now we can run inference, pointing it to this tokenizer using the `-z` flag:
-
-```
-./run out/model.bin -z data/tok4096.bin
-```
-
-This should print the samples. If you leave out the `-z` flag, it will use the default Llama 2 tokenizer, which would generate a good sequence of integers, but they would get translated using a different vocabulary to text, so it would look like gibberish.
-
-## performance
-
-There are many ways to potentially speed up this code depending on your system. Have a look at the [Makefile](Makefile), which contains a lot of notes. The `make run` command currently uses the `-O3` optimization by default, i.e.:
-
-```bash
-gcc -O3 -o run run.c -lm
-```
-
--O3 includes optimizations that are expensive in terms of compile time and memory usage. Including vectorization, loop unrolling, and predicting branches.
-
-To get a much better performance, try to compile with `make runfast`. This turns on the `-Ofast` flag, which includes additional optimizations that may break compliance with the C/IEEE specifications, in addition to `-O3`. See [the GCC docs](https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html) for more information.
-
-Try `-march=native` to compile the program to use the architecture of the machine you're compiling on rather than a more generic CPU. This may enable additional optimizations and hardware-specific tuning such as improved vector instructions/width.
-
-The fastest throughput I saw so far on my MacBook Air (M1) so far is with `make runfast`.
-
-You can also experiment with replacing `gcc` with `clang`.
-
-If compiling with gcc, try experimenting with `-funroll-all-loops`, see PR [#183](https://github.com/karpathy/llama2.c/pull/183)
-
-**OpenMP**. Big improvements can also be achieved by compiling with OpenMP, which "activates" the `#pragma omp parallel for` inside the matmul and attention, allowing the work in the loops to be split up over multiple processors.
-You'll need to install the OpenMP library and the clang compiler first (e.g. `apt install clang libomp-dev` on ubuntu). Then you can compile with `make runomp`, which does:
-
-```bash
-clang -Ofast -fopenmp -march=native run.c  -lm  -o run
-```
-
-When you run inference make sure to use OpenMP flags to set the number of threads, e.g.:
-
-```bash
-OMP_NUM_THREADS=4 ./run out/model.bin
-```
-
-Depending on your system resources you may want to tweak these hyperparameters and use more threads. But more is not always better, usually this is a bit U shaped. In particular, if your CPU has SMT (multithreading), try setting the number of threads to the number of physical cores rather than logical cores. The performance difference can be large due to cache thrashing and communication overhead. The PyTorch documentation [CPU specific optimizations
-](https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#cpu-specific-optimizations) has some good information that applies here too.
-
-## platforms
-
-On **Windows**, use `build_msvc.bat` in a Visual Studio Command Prompt to build with msvc, or you can use `make win64` to use mingw compiler toolchain from linux or windows to build the windows target. MSVC build will automatically use openmp and max threads appropriate for your CPU unless you set `OMP_NUM_THREADS` env.
-
-On **Centos 7**, **Amazon Linux 2018** use `rungnu` Makefile target: `make rungnu` or `make runompgnu` to use openmp.
-
-On **Mac**, use clang from brew for openmp build. Install clang as `brew install llvm` and use the installed clang binary to compile with openmp: `make runomp CC=/opt/homebrew/opt/llvm/bin/clang`
-
-## tests
-
-You can run tests simply with pytest:
-
-```bash
-$ pip install pytest
-$ pytest
-```
-
-This will currently invoke two tests inside `test_all.py`, which forward the model in both C and Python for 200 steps and check the output against a known good expected output. The tests currently run in only a few seconds, but will have to download and cache the stories260K models in a temporary `test` directory (only ~2MB download).
-
-There are also some tests in C, in the file [test.c](test.c). You can run these with `make testcc`, or to see more stuff printed:
-
-```
-make testcc VERBOSITY=1
-```
-
-Call for help: help add more tests.
-
-## ack
-
-I trained the llama2.c storyteller models on a 4X A100 40GB box graciously provided by the excellent [Lambda labs](https://lambdalabs.com/service/gpu-cloud), thank you.
-
-## discord
-
-Figured it's possible to reuse my existing discord channel (that I use for my [zero to hero youtube series](https://karpathy.ai/zero-to-hero.html)), see #llama2c channel on [discord](https://discord.gg/3zy8kqD9Cp), for any quick questions, related discussions, etc.
-
-## contributing
-
-A few words on this repo and the kinds of PRs that are likely to be accepted. What is the goal of this repo? Basically I think there will be a lot of interest in training or finetuning custom micro-LLMs (think ~100M - ~1B params, but let's say up to ~10B params) across a large diversity of applications, and deploying them in edge-adjacent environments (think MCUs, phones, web browsers, laptops, etc.). I'd like this repo to be the simplest, smallest, most hackable repo to support this workflow, both training and inference. In particular, this repo is not a complex framework with a 1000 knobs controlling inscrutible code across a nested directory structure of hundreds of files. Instead, I expect most applications will wish to create a fork of this repo and hack it to their specific needs and deployment platforms.
-
-People who care about deployment efficiency above all else should look at [llama.cpp](https://github.com/ggerganov/llama.cpp). This repo still cares about efficiency, but not at the cost of simplicity, readability or portability. Basically, I expect that a lot of people come to this repo because the training code is 2 readable .py files and the inference code is 500 lines of C. So I'd like this to continue to be a kind of simplest "reference implementation" that can be easily hacked in a separate fork into whatever downstream application people are excited about. It shouldn't be full-featured. It shouldn't take 100 different options or settings. It shouldn't be the most efficient. A few examples:
-
-- someone re-ordered two loops to improve data locality for a small efficieny win => instant merge.
-- someone added the one line "pragma omp parallel for", which allows you to compile with OpenMP and dramatically speed up the code, or acts as just a comment if you don't compile it that way => instant merge.
-- bug fixes and touchups etc. => happy to merge
-
-A few examples of PRs are that are not an excellent fit:
-
-- adding more than several #ifdefs all over the place in code. If they are localized / few, might be okay.
-- adding a lot of code that is very specific to some specific platform (e.g. MCUs, or some special version of linux or processor). These may be a better fit for forks of the project, and I am very happy to maintain a list of these forks in section below.
-- adding hundreds of lines of code to run.c that are only active in specific scenarios or platforms.
-
-If your candidate PRs have elements of these it doesn't mean they won't get merged, it just means they will make it into the gray territory. TLDR: I am eager to merge any mostly small, mostly localized, broadly applicable, clean changes that improve the efficiency and portability of the repo, while keep its hackability and readability. I appreciate all PRs seeking to help me improve the project, thank you! <3.
-
-## notable forks
-
-- Rust
-  - [llama2.rs](https://github.com/gaxler/llama2.rs) by @[gaxler](https://github.com/gaxler): a Rust port of this project
-  - [llama2.rs](https://github.com/leo-du/llama2.rs) by @[leo-du](https://github.com/leo-du): A Rust port of this project
-  - [llama2-rs](https://github.com/danielgrittner/llama2-rs) by @[danielgrittner](https://github.com/danielgrittner): a Rust port of this project
-  - [llama2.rs](https://github.com/lintian06/llama2.rs) by @[lintian06](https://github.com/lintian06): A Rust port of this project
-  - [pecca.rs](https://github.com/rahoua/pecca-rs) by @[rahoua](https://github.com/rahoua): A Rust port leveraging [ndarray](https://github.com/rust-ndarray/ndarray), supports BLAS.
-  - [llama2.rs](https://github.com/flaneur2020/llama2.rs) by @[flaneur2020](https://github.com/flaneur2020): A Rust port of this project.
-- Go
-  - [go-llama2](https://github.com/tmc/go-llama2) by @[tmc](https://github.com/tmc): a Go port of this project
-  - [llama2.go](https://github.com/nikolaydubina/llama2.go) by @[nikolaydubina](https://github.com/nikolaydubina): a Go port of this project
-  - [llama2.go](https://github.com/haormj/llama2.go) by @[haormj](https://github.com/haormj): a Go port of this project
-  - [llama2.go](https://github.com/saracen/llama2.go) by @[saracen](https://github.com/saracen): a Go port of this project
-- Android
-  - [llama2.c-android](https://github.com/Manuel030/llama2.c-android): by @[Manuel030](https://github.com/Manuel030): adds Android binaries of this project
-  - [llama2.c-android-wrapper](https://github.com/celikin/llama2.c-android-wrapper): by @[celikin](https://github.com/celikin): added JNI wrapper, PoC
-- C++
-  - [llama2.cpp](https://github.com/leloykun/llama2.cpp) by @[leloykun](https://github.com/leloykun): a C++ port of this project
-- JavaScript
-  - [llama2.js](https://github.com/epicure/llama2.js) by @[epicure](https://github.com/epicure): a JavaScript port of this project
-  - [llamajs](https://github.com/agershun/llamajs) by @[agershun](https://github.com/agershun): a JavaScript port of this project
-  - [llama2.ts](https://github.com/wizzard0/llama2.ts) by @[oleksandr_now](https://twitter.com/oleksandr_now): a TypeScript port of this project. Full Llama2-7B capable.
-  - [llama2.c-emscripten](https://github.com/gohai/llama2.c-emscripten) by @[gohai](https://github.com/gohai): Emscripten (JavaScript) port, based on @ggerganov's initial prototype
-- Zig
-  - [llama2.zig](https://github.com/cgbur/llama2.zig) by @[cgbur](https://github.com/cgbur): A Zig port of this project
-  - [llama2.zig](https://github.com/vodkaslime/llama2.zig) by @[vodkaslime](https://github.com/vodkaslime): a Zig port of this project
-  - [llama2.zig](https://github.com/clebert/llama2.zig) by @[clebert](https://github.com/clebert): a Zig port of this project
-- Julia
-  - [llama2.jl](https://github.com/juvi21/llama2.jl) by @[juvi21](https://github.com/juvi21): a Julia port of this project
-- Scala
-  - [llama2.scala](https://github.com/jrudolph/llama2.scala) by @[jrudolph](https://github.com/jrudolph): a Scala port of this project
-- Java
-  - [llama2.java](https://github.com/mukel/llama2.java) by @[mukel](https://github.com/mukel): a Java port of this project
-- Kotlin
-  - [llama2.kt](https://github.com/madroidmaq/llama2.kt) by @[madroidmaq](https://github.com/madroidmaq): a Kotlin port of this project
-- Python
-  - [llama2.py](https://github.com/tairov/llama2.py) by @[tairov](https://github.com/tairov): a simple one file pure Python port of this project with zero dependencies
-- C#
-  - [llama2.cs](https://github.com/trrahul/llama2.cs) by @[trrahul](https://github.com/trrahul): a C# port of this project
-- Dart
-  - [llama2.dart](https://github.com/yiminghan/llama2.dart) by @[yiminghan](https://github.com/yiminghan/llama2.dart): one-file dart port of this project, works with Flutter!
-- Web
-  - [llama2c-web](https://github.com/dmarcos/llama2.c-web) by @[dmarcos](https://github.com/dmarcos): Super simple way to build unmodified llama2.c to WASM and run it in the browser. [Demo](https://diegomarcos.com/llama2.c-web/)
-- WebAssembly
-  - [icpp-llm](https://github.com/icppWorld/icpp-llm): LLMs for the Internet Computer
-- Fortran
-  - [llama2.f90](https://github.com/rbitr/llama2.f90): a Fortran port of this project
-- Mojo
-  - [llama2.🔥](https://github.com/tairov/llama2.mojo) by @[tairov](https://github.com/tairov): pure Mojo port of this project
-- OCaml
-  - [llama2.ml](https://github.com/jackpeck/llama2.ml) by @[jackpeck](https://github.com/jackpeck): an OCaml port of this project
-- [llama2.c - Llama 2 Everywhere](https://github.com/trholding/llama2.c) by @[trholding](https://github.com/trholding): Standalone, Bootable & Portable Binary Llama 2
-- [llama2.c-zh - Bilingual Chinese and English](https://github.com/chenyangMl/llama2.c-zh) by @[chenyangMl](https://github.com/chenyangMl): Expand tokenizer to support training and inference in both Chinese and English
-
-## unsorted todos
-
-- add support in run.c of reading version 1+ files from export, later deprecate "version 0"
-- run.cu (CUDA) investigate and merge
-- add more tests inside [test.c](test.c)
-- add Engine class for use in sample.py that does efficient inference in PyTorch, e.g. KV cache keeping
-- make it easier to add a new dataset with not too much pain
-- (LoRA) finetuning and export of Llama 2 models
-
-## License
-
-MIT
+- `float32`类型的`stories15M.bin`权重占用内存低的原因是该内存使用`mmap`进行内存映射读取权重，而不是给权重分配内存。权重读取速度限制处理器处理速度，因此CPU利用率也低。此时性能为
+- 由于自带内存较小，不能加载`float32`类型的`stories15M.bin`。开启256M swap分区后尽管可以加载权重，但处理速度并没有得到提升，反而有一定下降，其性能为。可能是因为每次循环中均要将部分权重从swap分区转移至内存中。swap分区本质是硬盘的存储区域，用于缓存暂时不用的数据。每生成一个token都要使用权重，按照先进先出的环形队列，很可能造成最近需要使用的权重在swap分区中，反而导致性能下降。
+- Baby LLaMA 2 on Duo生成故事中，约98%花费在矩阵计算。使用矩阵分块、缓存友好性和RVV等GEMM技巧可以加速矩阵计算，性能大概提升1.2倍左右，因此也可以将生成token效率提高1.2倍左右。验证时可以单独使用矩阵乘法验证，也在`stories256K.bin`权重上验证。
+- 在CPU不变的情况下，如果内存足够（如128M），估计 Baby LLaMA 2 on Duo优化前可以达到 8 token/s，优化后可以达到 10 token/s。

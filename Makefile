@@ -1,12 +1,24 @@
 # choose your compiler, e.g. gcc/clang
 # example override to clang: make run CC=clang
-CC = gcc
+
+TOOLCHAIN_PREFIX = /opt/riscv/riscv64-linux-musl-x86_64/bin/riscv64-unknown-linux-musl-
+SYSROOT = /opt/riscv/riscv64-linux-musl-x86_64/sysroot
+
+CC = $(TOOLCHAIN_PREFIX)gcc
+
+LDFLAGS=-mcpu=c906fdv -march=rv64imafdcv0p7xthead -mcmodel=medany -mabi=lp64d -L/opt/riscv/riscv64-linux-musl-x86_64/sysroot/lib -L/opt/riscv/riscv64-linux-musl-x86_64/sysroot/usr/lib
+# -Os
+CFLAGS=-D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -I/opt/riscv/riscv64-linux-musl-x86_64/sysroot/usr/include
+
+# LDFLAGS=-mcpu=c906fdv -march=rv64imafdcv0p7xthead -mcmodel=medany -mabi=lp64d -L$(SYSROOT)/lib -L$(SYSROOT)/usr/lib
+# CFLAGS=-D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -I$(SYSROOT)/usr/include
+# 
 
 # the most basic way of building that is most likely to work on most systems
 .PHONY: run
 run: run.c
-	$(CC) -O3 -o run run.c -lm
-	$(CC) -O3 -o runq runq.c -lm
+	$(CC) $(CFLAGS) $(LDFLAGS) -O3 -o run run.c -lm
+	#$(CC) $(CFLAGS) $(LDFLAGS) -O3 -o runq runq.c -lm
 
 # useful for a debug build, can then e.g. analyze with valgrind, example:
 # $ valgrind --leak-check=full ./run out/model.bin -n 3
@@ -25,16 +37,16 @@ rundebug: run.c
 # In our specific application this is *probably* okay to use
 .PHONY: runfast
 runfast: run.c
-	$(CC) -Ofast -o run run.c -lm
-	$(CC) -Ofast -o runq runq.c -lm
+	$(CC) -Ofast $(CFLAGS) $(LDFLAGS) -o runfast run.c -lm
+	$(CC) -Ofast $(CFLAGS) $(LDFLAGS) -o runqfast runq.c -lm
 
 # additionally compiles with OpenMP, allowing multithreaded runs
 # make sure to also enable multiple threads when running, e.g.:
 # OMP_NUM_THREADS=4 ./run out/model.bin
 .PHONY: runomp
 runomp: run.c
-	$(CC) -Ofast -fopenmp -march=native run.c  -lm  -o run
-	$(CC) -Ofast -fopenmp -march=native runq.c  -lm  -o runq
+	$(CC) -Ofast $(CFLAGS) $(LDFLAGS) -fopenmp -march=native run.c  -lm  -o run
+	$(CC) -Ofast $(CFLAGS) $(LDFLAGS) -fopenmp -march=native runq.c  -lm  -o runq
 
 .PHONY: win64
 win64:
