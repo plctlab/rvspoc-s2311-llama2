@@ -20,7 +20,7 @@ make结果: **run-gcc-musl-Ofast-rv64gcv0p7_zfh_xthead**、**runq-gcc-musl-Ofast
 `$ ./runq-gcc-musl-Ofast-rv64gcv0p7_zfh_xthead stories15M.q80`
 使用第3步编译的镜像运行需要25M swap空间，推理速度约9.5token/s
 
-### 4.优化点
+### 5.优化点
 1. int8 Q8_0量化
 2. 矩阵向量乘法计算顺序优化
 
