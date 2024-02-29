@@ -11,7 +11,7 @@
 make之后我们得到了runq二进制文件。
 
 ### 2.量化模型
-
+在这里下载 [stories15M.bin](https://huggingface.co/karpathy/tinyllamas/blob/main/stories15M.bin) 和 [stories15M.pt](https://huggingface.co/karpathy/tinyllamas/blob/main/stories15M.pt)。
 ```bash
 python3 export.py stories15M_q8.bin --version 2 --checkpoint ./stories15M.pt
 ```
