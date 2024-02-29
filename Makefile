@@ -1,6 +1,6 @@
 # choose your compiler, e.g. gcc/clang
 # example override to clang: make run CC=clang
-CC = gcc
+CC = riscv64-linux-gnu-gcc
 
 # the most basic way of building that is most likely to work on most systems
 .PHONY: run
@@ -51,6 +51,16 @@ rungnu:
 runompgnu:
 	$(CC) -Ofast -fopenmp -std=gnu11 run.c  -lm  -o run
 	$(CC) -Ofast -fopenmp -std=gnu11 runq.c  -lm  -o runq
+
+
+.PHONY: milk-v
+milk-v: run.c
+	$(CC) -Ofast -o run run.c -lm -static
+	$(CC) -Ofast -o runq runq.c -lm -static
+
+# Please use the musl version of the cross-compilation toolchain, 
+# or add the -static option when compiling, 
+# or specify the path of the musl linker: -Wl,--dynamic-linker=./ld-musl-riscv64v0p7_xthead.so.1, which is copied from the /lib/ld-musl-riscv64v0p7_xthead.so.1 in the official milk-duo image.
 
 # run all tests
 .PHONY: test
