@@ -40,3 +40,6 @@ make结果: **run-gcc-musl-Ofast-rv64gcv0p7_zfh_xthead**、**runq-gcc-musl-Ofast
 ### 4.运行
 `$ ./main -m stories15M.gguf.q4k -n 100`
 使用55M内存版本镜像运行需要2M swap空间，推理速度约5.1token/s
+
+## TTS
+由于内存不够，合成速度较慢
