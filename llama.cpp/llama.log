@@ -1,0 +1,54 @@
+[1707197348] 
+llama server listening at http://127.0.0.1:8080
+
+[1707197348] warming up the model with an empty run
+[1707197348] Available slots:
+[1707197348]  -> Slot 0 - max context: 512
+[1707197348] all slots are idle and system prompt is empty, clear the KV cache
+[1707197592] slot 0 is processing [task id: 0]
+[1707197592] slot 0 : in cache: 0 tokens | to process: 48 tokens
+[1707197592] slot 0 : kv cache rm - [0, end)
+[1707197592] sampled token: 151645: ''
+[1707197592] sampled token:   198: '
+'
+[1707197592] sampled token: 151644: ''
+[1707197592] sampled token:  9707: 'Hello'
+[1707197592] sampled token:     0: '!'
+[1707197592] sampled token:  2585: ' How'
+[1707197592] sampled token:   646: ' can'
+[1707197593] sampled token:   358: ' I'
+[1707197593] sampled token:  7789: ' assist'
+[1707197593] sampled token:   498: ' you'
+[1707197593] sampled token:  3351: ' today'
+[1707197593] sampled token:    30: '?'
+[1707197593] sampled token: 151645: ''
+[1707197593] sampled token:   198: '
+'
+[1707197593] sampled token: 151643: ''
+[1707197593] 
+[1707197593] print_timings: prompt eval time =     353.52 ms /    48 tokens (    7.36 ms per token,   135.78 tokens per second)
+[1707197593] print_timings:        eval time =     490.30 ms /    15 runs   (   32.69 ms per token,    30.59 tokens per second)
+[1707197593] print_timings:       total time =     843.82 ms
+[1707197593] slot 0 released (63 tokens in cache)
+[1707197634] slot 0 is processing [task id: 18]
+[1707197634] slot 0 : in cache: 43 tokens | to process: 6 tokens
+[1707197634] slot 0 : kv cache rm - [43, end)
+[1707197634] sampled token:   320: ' ('
+[1707197634] sampled token: 105626: '微笑'
+[1707197634] sampled token:     8: ')'
+[1707197634] sampled token: 108386: '你好'
+[1707197634] sampled token:  6313: '！'
+[1707197634] sampled token: 104139: '有什么'
+[1707197634] sampled token: 109944: '我可以'
+[1707197634] sampled token: 100364: '帮助'
+[1707197635] sampled token: 103929: '你的'
+[1707197635] sampled token: 101037: '吗'
+[1707197635] sampled token: 94432: '？
+'
+[1707197635] sampled token:  1474: 'User'
+[1707197635] sampled token:    25: ':'
+[1707197635] 
+[1707197635] print_timings: prompt eval time =      60.63 ms /     6 tokens (   10.11 ms per token,    98.96 tokens per second)
+[1707197635] print_timings:        eval time =     421.90 ms /    13 runs   (   32.45 ms per token,    30.81 tokens per second)
+[1707197635] print_timings:       total time =     482.53 ms
+[1707197635] slot 0 released (62 tokens in cache)

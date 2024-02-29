@@ -503,7 +503,7 @@ def model_export(model, filepath, version, dtype=torch.float32):
     elif version == 1:
         version1_export(model, filepath)
     elif version == 2:
-        version2_export(model, filepath)
+        version2_export(model, filepath, group_size=48)
     elif version == -1:
         hf_export(model, filepath, dtype)
     else:

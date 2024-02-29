@@ -320,24 +320,40 @@ void matmul(float* xout, QuantizedTensor *x, QuantizedTensor *w, int n, int d) {
     // inputs to this function are both quantized
 
     int i;
+    int nfactor = n / GS;
     #pragma omp parallel for private(i)
-    for (i = 0; i < d; i++) {
-
+    for (i = 0; i < d; i+=2) {
+        int ip = i + 1;
+        
         float val = 0.0f;
+        float valp = 0.0f;
+        
         int32_t ival = 0;
+        int32_t ivalp = 0;
+        
         int in = i * n;
+        int inp = in + n;
 
         // do the matmul in groups of GS
         int j;
+        int in_o_gs = i * nfactor;
+        int inp_o_gs = in_o_gs + nfactor;
+
+        int j_o_gs = 0;
         for (j = 0; j <= n - GS; j += GS) {
             for (int k = 0; k < GS; k++) {
                 ival += ((int32_t) x->q[j + k]) * ((int32_t) w->q[in + j + k]);
+                ivalp += ((int32_t) x->q[j + k]) * ((int32_t) w->q[inp + j + k]);
             }
-            val += ((float) ival) * w->s[(in + j) / GS] * x->s[j / GS];
+            val += ((float) ival) * w->s[in_o_gs++] * x->s[j_o_gs];
+            valp += ((float) ivalp) * w->s[inp_o_gs++] * x->s[j_o_gs];
+            j_o_gs++;
             ival = 0;
+            ivalp = 0;
         }
 
         xout[i] = val;
+        xout[ip] = valp;
     }
 }
 
