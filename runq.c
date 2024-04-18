@@ -156,7 +156,7 @@ void dequantize_token(QuantizedTensor *qx, float* x, int dim, int token) {
 	float* ps = qx->s + token*dim/GS;
 
 	//NOTEME: auto simd would cause clang crash
-	//#pragma omp simd
+    //#pragma omp simd
 	for (int i = 0; i < dim; i++) {
 		x[i] = pq[i] * ps[i / GS];
 	}
@@ -171,7 +171,7 @@ void quantize(QuantizedTensor *qx, float* x, int n) {
 
         // find the max absolute value in the current group
         float wmax = 0.0;
-		#pragma omp simd
+        #pragma omp simd
         for (int i = 0; i < GS; i++) {
             float val = fabs(x[group * GS + i]);
             if (val > wmax) {
@@ -185,7 +185,7 @@ void quantize(QuantizedTensor *qx, float* x, int n) {
 
         // calculate and write the quantized values
 		//NOTEME: auto simd would cause program crash
-		//#pragma omp simd
+        //#pragma omp simd
         for (int i = 0; i < GS; i++) {
             float quant_value = x[group * GS + i] / scale; // scale
             int8_t quantized = (int8_t) round(quant_value); // round and clamp
@@ -267,12 +267,12 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
     // figure out the file size
     fseek(file, 0, SEEK_END); // move file pointer to end of file
     *file_size = ftell(file); // get the file size, in bytes
-	fclose(file);
-	// memory map the Transformer weights into the data pointer
-	*fd = open(checkpoint, O_RDONLY); // open in read only mode
-	if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
-	*data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
-	if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
+    fclose(file);
+    // memory map the Transformer weights into the data pointer
+    *fd = open(checkpoint, O_RDONLY); // open in read only mode
+    if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
+    *data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
+    if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
     void* weights_ptr = ((char*)*data) + header_size; // skip header bytes. char is 1 byte
     memory_map_weights(weights, config, weights_ptr, shared_classifier);
 }
@@ -312,7 +312,7 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
     // calculate sum of squares
     float ss = 0.0f;
 
-	#pragma omp simd
+    #pragma omp simd
     for (int j = 0; j < size; j++) {
         ss += x[j] * x[j];
     }
@@ -320,7 +320,7 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
     ss += 1e-5f;
     ss = 1.0f / sqrtf(ss);
     // normalize and scale
-	#pragma omp simd
+    #pragma omp simd
     for (int j = 0; j < size; j++) {
         o[j] = weight[j] * (ss * x[j]);
     }
@@ -330,7 +330,7 @@ void softmax(float* x, int size) {
     // find max value (for numerical stability)
     float max_val = x[0];
     
-	#pragma omp simd
+    #pragma omp simd
     for (int i = 1; i < size; i++) {
         if (x[i] > max_val) {
             max_val = x[i];
@@ -340,7 +340,7 @@ void softmax(float* x, int size) {
     // exp and sum
     float sum = 0.0f;
 	//NOTEME: auto simd would cause program crash
-	//#pragma omp simd
+    //#pragma omp simd
     for (int i = 0; i < size; i++) {
 #ifndef FAST_EXPF
         x[i] = expf(x[i] - max_val);
@@ -358,7 +358,7 @@ void softmax(float* x, int size) {
     }
 
     // normalize
-	#pragma omp simd
+    #pragma omp simd
     for (int i = 0; i < size; i++) {
         x[i] /= sum;
     }
@@ -476,7 +476,7 @@ float* forward(Transformer* transformer, int token, int pos) {
                 float* k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
                 // calculate the attention score as the dot product of q and k
                 float score = 0.0f;
-				#pragma omp simd
+                #pragma omp simd
                 for (int i = 0; i < head_size; i++) {
                     score += q[i] * k[i];
                 }
@@ -497,7 +497,7 @@ float* forward(Transformer* transformer, int token, int pos) {
                 // get the attention weight for this timestep
                 float a = att[t];
                 // accumulate the weighted value into xb
-				#pragma omp simd
+                #pragma omp simd
                 for (int i = 0; i < head_size; i++) {
                     xb[i] += a * v[i];
                 }
@@ -509,7 +509,7 @@ float* forward(Transformer* transformer, int token, int pos) {
         matmul(s->xb2, &s->xq, w->wo + l, dim, dim);
 
         // residual connection back into x
-		#pragma omp simd
+        #pragma omp simd
         for (int i = 0; i < dim; i++) {
             x[i] += s->xb2[i];
         }
@@ -525,7 +525,7 @@ float* forward(Transformer* transformer, int token, int pos) {
 
         // SwiGLU non-linearity
 		//NOTEME: auto simd would cause program crash
-		//#pragma omp simd
+        //#pragma omp simd
         for (int i = 0; i < hidden_dim; i++) {
             float val = s->hb[i];
             // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
@@ -551,7 +551,7 @@ float* forward(Transformer* transformer, int token, int pos) {
         matmul(s->xb, &s->hq, w->w2 + l, hidden_dim, dim);
 
         // residual connection
-		#pragma omp simd
+        #pragma omp simd
         for (int i = 0; i < dim; i++) {
             x[i] += s->xb[i];
         }
