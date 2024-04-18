@@ -8,12 +8,22 @@
 #include <math.h>
 #include <string.h>
 #include <fcntl.h>
+#include <assert.h>
 #if defined _WIN32
     #include "win.h"
 #else
     #include <unistd.h>
     #include <sys/mman.h>
 #endif
+
+#define TOKEN_TABLE_DEQUANT_ONFLY
+#define RVV_INTRINSIC
+#define FAST_EXPF
+
+#ifdef RVV_INTRINSIC
+#include <riscv_vector.h>
+#endif
+
 // ----------------------------------------------------------------------------
 // Globals
 int GS = 0; // group size global for quantization of the weights
@@ -105,6 +115,7 @@ void malloc_run_state(RunState* s, Config* p) {
     s->logits = calloc(p->vocab_size, sizeof(float));
     s->key_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
     s->value_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
+	//system("free");
     // ensure all mallocs went fine
     if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q
      || !s->k || !s->v || !s->att || !s->logits || !s->key_cache
@@ -135,12 +146,24 @@ void free_run_state(RunState* s) {
 
 // ----------------------------------------------------------------------------
 // Quantization functions
-
+#ifndef TOKEN_TABLE_DEQUANT_ONFLY
 void dequantize(QuantizedTensor *qx, float* x, int n) {
     for (int i = 0; i < n; i++) {
         x[i] = qx->q[i] * qx->s[i / GS];
     }
 }
+#else
+void dequantize_token(QuantizedTensor *qx, float* x, int dim, int token) {
+	int8_t* pq = qx->q + token*dim;
+	float* ps = qx->s + token*dim/GS;
+
+	//NOTEME: auto simd would cause clang crash
+	//#pragma omp simd
+	for (int i = 0; i < dim; i++) {
+		x[i] = pq[i] * ps[i / GS];
+	}
+}
+#endif
 
 void quantize(QuantizedTensor *qx, float* x, int n) {
     int num_groups = n / GS;
@@ -150,6 +173,7 @@ void quantize(QuantizedTensor *qx, float* x, int n) {
 
         // find the max absolute value in the current group
         float wmax = 0.0;
+		#pragma omp simd
         for (int i = 0; i < GS; i++) {
             float val = fabs(x[group * GS + i]);
             if (val > wmax) {
@@ -162,6 +186,8 @@ void quantize(QuantizedTensor *qx, float* x, int n) {
         qx->s[group] = scale;
 
         // calculate and write the quantized values
+		//NOTEME: auto simd would cause program crash
+		//#pragma omp simd
         for (int i = 0; i < GS; i++) {
             float quant_value = x[group * GS + i] / scale; // scale
             int8_t quantized = (int8_t) round(quant_value); // round and clamp
@@ -188,6 +214,7 @@ QuantizedTensor *init_quantized_tensors(void **ptr, int n, int size_each) {
 
 void memory_map_weights(TransformerWeights *w, Config* p, void* ptr, uint8_t shared_classifier) {
     int head_size = p->dim / p->n_heads;
+
     // first are the parameters that are kept in fp32 (the rmsnorm (1D) weights)
     float* fptr = (float*) ptr; // cast our pointer to float*
     w->rms_att_weight = fptr;
@@ -201,8 +228,10 @@ void memory_map_weights(TransformerWeights *w, Config* p, void* ptr, uint8_t sha
     ptr = (void*)fptr; // now cast the pointer back to void*
     w->q_tokens = init_quantized_tensors(&ptr, 1, p->vocab_size * p->dim);
     // dequantize token embedding table
+#ifndef TOKEN_TABLE_DEQUANT_ONFLY	
     w->token_embedding_table = malloc(p->vocab_size * p->dim * sizeof(float));
     dequantize(w->q_tokens, w->token_embedding_table, p->vocab_size * p->dim);
+#endif	
 
     w->wq = init_quantized_tensors(&ptr, p->n_layers, p->dim * (p->n_heads * head_size));
     w->wk = init_quantized_tensors(&ptr, p->n_layers, p->dim * (p->n_kv_heads * head_size));
@@ -214,6 +243,7 @@ void memory_map_weights(TransformerWeights *w, Config* p, void* ptr, uint8_t sha
     w->w3 = init_quantized_tensors(&ptr, p->n_layers, p->dim * p->hidden_dim);
 
     w->wcls = shared_classifier ? w->q_tokens : init_quantized_tensors(&ptr, 1, p->dim * p->vocab_size);
+	//system("free");
 }
 
 void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weights,
@@ -240,12 +270,12 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
     // figure out the file size
     fseek(file, 0, SEEK_END); // move file pointer to end of file
     *file_size = ftell(file); // get the file size, in bytes
-    fclose(file);
-    // memory map the Transformer weights into the data pointer
-    *fd = open(checkpoint, O_RDONLY); // open in read only mode
-    if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
-    *data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
-    if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
+	fclose(file);
+	// memory map the Transformer weights into the data pointer
+	*fd = open(checkpoint, O_RDONLY); // open in read only mode
+	if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
+	*data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
+	if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
     void* weights_ptr = ((char*)*data) + header_size; // skip header bytes. char is 1 byte
     memory_map_weights(weights, config, weights_ptr, shared_classifier);
 }
@@ -260,7 +290,9 @@ void build_transformer(Transformer *t, char* checkpoint_path) {
 void free_transformer(Transformer* t) {
     // free QuantizedTensors
     free(t->weights.q_tokens);
+#ifndef TOKEN_TABLE_DEQUANT_ONFLY	
     free(t->weights.token_embedding_table);
+#endif	
     free(t->weights.wq);
     free(t->weights.wk);
     free(t->weights.wv);
@@ -282,6 +314,8 @@ void free_transformer(Transformer* t) {
 void rmsnorm(float* o, float* x, float* weight, int size) {
     // calculate sum of squares
     float ss = 0.0f;
+
+	#pragma omp simd
     for (int j = 0; j < size; j++) {
         ss += x[j] * x[j];
     }
@@ -289,6 +323,7 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
     ss += 1e-5f;
     ss = 1.0f / sqrtf(ss);
     // normalize and scale
+	#pragma omp simd
     for (int j = 0; j < size; j++) {
         o[j] = weight[j] * (ss * x[j]);
     }
@@ -297,18 +332,36 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
 void softmax(float* x, int size) {
     // find max value (for numerical stability)
     float max_val = x[0];
+    
+	#pragma omp simd
     for (int i = 1; i < size; i++) {
         if (x[i] > max_val) {
             max_val = x[i];
         }
     }
+
     // exp and sum
     float sum = 0.0f;
+	//NOTEME: auto simd would cause program crash
+	//#pragma omp simd
     for (int i = 0; i < size; i++) {
+#ifndef FAST_EXPF
         x[i] = expf(x[i] - max_val);
+#else
+		float xx = x[i] - max_val;
+		union {
+			float d;
+			uint32_t x;
+		} data;
+
+		data.x = (12102203 * xx + 1064866816);
+		x[i] = data.d;
+#endif
         sum += x[i];
     }
+
     // normalize
+	#pragma omp simd
     for (int i = 0; i < size; i++) {
         x[i] /= sum;
     }
@@ -318,31 +371,46 @@ void matmul(float* xout, QuantizedTensor *x, QuantizedTensor *w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
     // inputs to this function are both quantized
-
     int i;
+
     #pragma omp parallel for private(i)
     for (i = 0; i < d; i++) {
 
         float val = 0.0f;
-        int32_t ival = 0;
+        int32_t ival;
         int in = i * n;
 
         // do the matmul in groups of GS
         int j;
         for (j = 0; j <= n - GS; j += GS) {
-            for (int k = 0; k < GS; k++) {
-                ival += ((int32_t) x->q[j + k]) * ((int32_t) w->q[in + j + k]);
-            }
-            val += ((float) ival) * w->s[(in + j) / GS] * x->s[j / GS];
-            ival = 0;
-        }
+#ifndef RVV_INTRINSIC			
+			ival = 0;
+			for (int k = 0; k < GS; k++) {
+					ival += ((int32_t) x->q[j + k]) * ((int32_t) w->q[in + j + k]);
+			}
+			val += ((float) ival) * w->s[(in + j) / GS] * x->s[j / GS];
+#else
+			const int8_t *xq = &x->q[j];
+			const int8_t *wq = &w->q[in + j];
+
+			size_t vl = vsetvl_e8m2(GS);  //max 128b/8b*2=32 int8 elements for GS=32
+			vint8m2_t vxq = vlb_v_i8m2(xq, vl);
+			vint8m2_t vwq = vlb_v_i8m2(wq, vl);
+			vint32m1_t vone = vmv_v_x_i32m1(1,1);  //set vone=1 , int32x1
+			vint16m4_t vprod = vwmul_vv_i16m4(vxq, vwq, vl);
+			vint32m1_t vresult = vmv_v_x_i32m1(0,1);  //set vresult=0, int32x1
+			vresult = vwredsum_vs_i16m4_i32m1(vresult, vprod, vone, vl);
+			float scale = w->s[(in + j) / GS] * x->s[j / GS];
+			ival = vmv_x_s_i32m1_i32(vresult);
+			val += ((float) ival) * scale;
+#endif
+		}
 
         xout[i] = val;
     }
 }
 
 float* forward(Transformer* transformer, int token, int pos) {
-
     // a few convenience variables
     Config* p = &transformer->config;
     TransformerWeights* w = &transformer->weights;
@@ -355,11 +423,14 @@ float* forward(Transformer* transformer, int token, int pos) {
     int head_size = dim / p->n_heads;
 
     // copy the token embedding into x
+#ifdef TOKEN_TABLE_DEQUANT_ONFLY	
+    dequantize_token(w->q_tokens, x, dim, token);
+#else
     memcpy(x, w->token_embedding_table + token*dim, dim * sizeof(float));
+#endif	
 
     // forward all the layers
     for(int l = 0; l < p->n_layers; l++) {
-
         // attention rmsnorm
         rmsnorm(s->xb, x, w->rms_att_weight + l*dim, dim);
 
@@ -395,6 +466,7 @@ float* forward(Transformer* transformer, int token, int pos) {
 
         // multihead attention. iterate over all heads
         int h;
+		
         #pragma omp parallel for private(h)
         for (h = 0; h < p->n_heads; h++) {
             // get the query vector for this head
@@ -407,6 +479,7 @@ float* forward(Transformer* transformer, int token, int pos) {
                 float* k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
                 // calculate the attention score as the dot product of q and k
                 float score = 0.0f;
+				#pragma omp simd
                 for (int i = 0; i < head_size; i++) {
                     score += q[i] * k[i];
                 }
@@ -427,6 +500,7 @@ float* forward(Transformer* transformer, int token, int pos) {
                 // get the attention weight for this timestep
                 float a = att[t];
                 // accumulate the weighted value into xb
+				#pragma omp simd
                 for (int i = 0; i < head_size; i++) {
                     xb[i] += a * v[i];
                 }
@@ -438,6 +512,7 @@ float* forward(Transformer* transformer, int token, int pos) {
         matmul(s->xb2, &s->xq, w->wo + l, dim, dim);
 
         // residual connection back into x
+		#pragma omp simd
         for (int i = 0; i < dim; i++) {
             x[i] += s->xb2[i];
         }
@@ -452,10 +527,23 @@ float* forward(Transformer* transformer, int token, int pos) {
         matmul(s->hb2, &s->xq, w->w3 + l, dim, hidden_dim);
 
         // SwiGLU non-linearity
+		//NOTEME: auto simd would cause program crash
+		//#pragma omp simd
         for (int i = 0; i < hidden_dim; i++) {
             float val = s->hb[i];
             // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
+#ifndef FAST_EXPF
             val *= (1.0f / (1.0f + expf(-val)));
+#else
+			float xx = -val;
+			union {
+				float d;
+				uint32_t x;
+			} data;
+
+			data.x = (12102203 * xx + 1064866816);
+            val *= (1.0f / (1.0f + data.d));
+#endif
             // elementwise multiply with w3(x)
             val *= s->hb2[i];
             s->hb[i] = val;
@@ -466,6 +554,7 @@ float* forward(Transformer* transformer, int token, int pos) {
         matmul(s->xb, &s->hq, w->w2 + l, hidden_dim, dim);
 
         // residual connection
+		#pragma omp simd
         for (int i = 0; i < dim; i++) {
             x[i] += s->xb[i];
         }
@@ -810,6 +899,7 @@ float random_f32(unsigned long long *state) { // random float32 in [0,1)
 int sample(Sampler* sampler, float* logits) {
     // sample the token given the logits and some hyperparameters
     int next;
+
     if (sampler->temperature == 0.0f) {
         // greedy argmax sampling: take the token with the highest probability
         next = sample_argmax(logits, sampler->vocab_size);
@@ -829,6 +919,7 @@ int sample(Sampler* sampler, float* logits) {
             next = sample_topp(logits, sampler->vocab_size, sampler->topp, sampler->probindex, coin);
         }
     }
+
     return next;
 }
 
@@ -1090,3 +1181,4 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 #endif
+
