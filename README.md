@@ -4,7 +4,7 @@ Baby LLama2 is an interesting opensource project, which implements an available 
 
 ## Requirements 
 
-Any Linux system available on Milk-V duo is ok, as long as the free memory is above 25MB (may be queried in terminal by 'free' command, attention to the third column). The avaiable memory of offical image is far from enough, which could be improved by recompiling system image with following modification: https://github.com/milkv-duo/duo-buildroot-sdk#faqs
+Any Linux system available on Milk-V duo is ok, as long as the free memory is above 25MB (may be queried in terminal by 'free' command, attention to the third column). The available memory of offical Milk-V image is far from enough, which could be improved by recompiling system image with following modification: https://github.com/milkv-duo/duo-buildroot-sdk#faqs
 
 ## Optimization 
 
@@ -17,7 +17,9 @@ Above optimizations is only applied on int8 code 'runq.c' , while float32 versio
 
 ## Compilation and Usage
 
-Just execute 'make runfast' to obtain the best optimized binary. The default compiler is gcc, while you can use alternative clang compiler by executing 'COMPILER=clang make runfast'. The gcc compiler could be downloaded from https://occ-oss-prod.oss-cn-hangzhou.aliyuncs.com/resource/1705396260835/Xuantie-900-gcc-linux-5.10.4-musl32-x86_64-V2.8.1-20240115.tar.gz , while clang compiler from https://occ-oss-prod.oss-cn-hangzhou.aliyuncs.com/resource//1701340474733/Xuantie-900-llvm-linux-5.10.4-glibc-x86_64-V1.0.0-beta-20231116.tar.gz . Attention, the Milk-V official gcc compiler 'Xuantie-900 linux-5.10.4 musl gcc Toolchain V2.6.1 B-20220906' could not compile the optimized RVV instrinsic code of matmul function. The reason is still unknown. Any fix is welcome and appreciated.
+Just execute `make runfast` to obtain the best optimized binary. The default compiler is gcc, while you can use alternative clang compiler by executing `COMPILER=clang make runfast`. The gcc compiler could be downloaded from https://occ-oss-prod.oss-cn-hangzhou.aliyuncs.com/resource/1705396260835/Xuantie-900-gcc-linux-5.10.4-musl32-x86_64-V2.8.1-20240115.tar.gz , while clang compiler from https://occ-oss-prod.oss-cn-hangzhou.aliyuncs.com/resource//1701340474733/Xuantie-900-llvm-linux-5.10.4-glibc-x86_64-V1.0.0-beta-20231116.tar.gz . Attention, the Milk-V official gcc compiler 'Xuantie-900 linux-5.10.4 musl gcc Toolchain V2.6.1 B-20220906' could not compile the optimized RVV instrinsic code of matmul function. The reason is still unknown. Any fix is welcome and appreciated. 
+
+Additionally please note that, the gcc compiled binary (runfast version) is about 10% slower than clang compilation, while it is much smaller than clang. The main reason may be that clang support auto vectorization and do more aggressive performance optimization while gcc pays more attention to balance of speed and size. So we choose gcc as the default compiler. The desicion is up to you according to application scenario.
 
 The generated binary 'runq-fast' could be uploaded to Milk-V board and run with prepared int8 model file stories15M_q80.bin. The command line arguments could be referenced from baby-llama2 README: https://github.com/karpathy/llama2.c . The int8 quantitized model file is not provided by official baby-llama2 repo, while you can download it from prebuilt directory of this repo, or convert it by following steps: 
 1. download pretrained weight data stories15M.pt from https://huggingface.co/karpathy/tinyllamas/tree/main
