@@ -1,4 +1,4 @@
-## Baby LLama2 optimization for Milk-V Duo board
+## Baby LLama2 optimized for Milk-V Duo board
 
 Baby LLama2 is an interesting opensource project, which implements an available LLM chat engine in C code less than 1000 lines. To make such an AI program running on tiny Milk-V duo board (T-Head C906 1GHz with RVV0.7 vector extension, 64MB SDRAM) is a cool thing, which became a challenging problem of first RVSPOC championship (RISCV Software Porting and Optimization Competition) held in 2023, China. We participated in this competition and achieved the optimized story generation speed of 24 tokens/s on offcial Milk-V duo system with 55MB memory configuration. 
 
