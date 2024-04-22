@@ -6,7 +6,7 @@ Baby LLama2 is an interesting opensource project, which implements an available 
 
 Any Linux system available on Milk-V duo is ok, as long as the free memory is above 25MB (may be queried in terminal by 'free' command, attention to the third column). The available memory of offical Milk-V image is far from enough, which could be improved by recompiling system image with following modification: https://github.com/milkv-duo/duo-buildroot-sdk#faqs
 
-## Optimization 
+## Optimizations
 
 1. Use int8 quantitized model to reduce memory footprint and improve performance.
 2. Use partial on-fly dequantitization to dramatically reduce memory footprint, which greatly improve performance of file I/O cache.
