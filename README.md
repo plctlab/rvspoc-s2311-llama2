@@ -12,6 +12,7 @@ Any Linux system available on Milk-V duo is ok, as long as the free memory is ab
 2. Use partial on-fly dequantitization to dramatically reduce memory footprint, which greatly improve performance of file I/O cache.
 3. Use RVV instrinsic to optimize time-consuming matmul function.
 4. Optimize exponential function with approximated fast algorithm.
+5. Use openmp directive to auto-vectorize small loops (only effective with clang)
 
 Above optimizations is only applied on int8 code 'runq.c' , while float32 version 'run.c' is unmodified.
 
