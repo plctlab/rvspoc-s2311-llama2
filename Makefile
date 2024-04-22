@@ -1,16 +1,28 @@
 # choose your compiler, e.g. gcc/clang
-# example override to clang: make run CC=clang
-CC = gcc
+# example override to clang: make run COMPILER=clang
+ifndef COMPILER
+#COMPILER = clang
+COMPILER = gcc
+endif
+
+ifeq ($(COMPILER),clang)
+CC = ~/milkv/Xuantie-900-llvm-linux-5.10.4-glibc-x86_64-V1.0.0-beta/bin/clang -mcpu=c906fdv -mrvv-vector-bits=128 -fopenmp-simd -static
+CFLAGS_EXTRA = -fno-vectorize
+else ifeq ($(COMPILER),gcc)
+CC = ~/milkv/Xuantie-900-gcc-linux-5.10.4-musl64-x86_64-V2.8.1/bin/riscv64-unknown-linux-musl-gcc -mcpu=c906fdv -mrvv-vector-bits=128 -fopenmp-simd -static
+else
+$(error "unknown compiler!")
+endif
 
 # the most basic way of building that is most likely to work on most systems
 .PHONY: run
-run: run.c
-	$(CC) -O3 -o run run.c -lm
-	$(CC) -O3 -o runq runq.c -lm
+run: run.c runq.c
+	$(CC) -O3 $(CFLAGS_EXTRA) -o run run.c -lm
+	$(CC) -O3 $(CFLAGS_EXTRA) -o runq runq.c -lm
 
 # useful for a debug build, can then e.g. analyze with valgrind, example:
 # $ valgrind --leak-check=full ./run out/model.bin -n 3
-rundebug: run.c
+rundebug: run.c runq.c
 	$(CC) -g -o run run.c -lm
 	$(CC) -g -o runq runq.c -lm
 
@@ -24,17 +36,17 @@ rundebug: run.c
 # It turns off -fsemantic-interposition.
 # In our specific application this is *probably* okay to use
 .PHONY: runfast
-runfast: run.c
-	$(CC) -Ofast -o run run.c -lm
-	$(CC) -Ofast -o runq runq.c -lm
+runfast: run.c runq.c
+	$(CC) -Ofast $(CFLAGS_EXTRA) -o run-fast run.c -lm
+	$(CC) -Ofast $(CFLAGS_EXTRA) -o runq-fast runq.c -lm
 
 # additionally compiles with OpenMP, allowing multithreaded runs
 # make sure to also enable multiple threads when running, e.g.:
 # OMP_NUM_THREADS=4 ./run out/model.bin
 .PHONY: runomp
-runomp: run.c
-	$(CC) -Ofast -fopenmp -march=native run.c  -lm  -o run
-	$(CC) -Ofast -fopenmp -march=native runq.c  -lm  -o runq
+runomp: run.c runq.c
+	$(CC) -Ofast -fopenmp -march=native $(CFLAGS_EXTRA) run.c  -lm  -o run
+	$(CC) -Ofast -fopenmp -march=native $(CFLAGS_EXTRA) runq.c  -lm  -o runq
 
 .PHONY: win64
 win64:
